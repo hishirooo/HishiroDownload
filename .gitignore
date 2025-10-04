@@ -1,0 +1,41 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+env/
+ENV/
+venv/
+
+# Qt Designer compiled UI and resource files
+*.ui.py
+*.qrc.py
+
+# PyInstaller build output
+dist/
+build/
+*.spec
+
+# Inno Setup outputs
+*.iss
+*.exe
+*.bat
+*.log
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*_backup.py
+*_backup.ui
+*.bak
+*.tmp
