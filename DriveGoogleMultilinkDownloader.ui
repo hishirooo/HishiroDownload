@@ -46,7 +46,7 @@
           </column>
           <column>
            <property name="text">
-            <string>ETA</string>
+            <string>Filename</string>
            </property>
           </column>
          </widget>
@@ -249,6 +249,13 @@
          </property>
          <property name="value">
           <number>24</number>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="label_Speed">
+         <property name="text">
+          <string>Speed: —</string>
          </property>
         </widget>
        </item>

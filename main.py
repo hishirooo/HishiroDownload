@@ -10,12 +10,12 @@ import re
 import subprocess
 # --- DriveDownloader Thread Class ---
 class DownloadWorker(QtCore.QObject):
-    
     finished = QtCore.pyqtSignal()
     progress_update = QtCore.pyqtSignal(int)               # % của file hiện tại
     log_message = QtCore.pyqtSignal(str, str)              # (msg, level)
-    update_item_status = QtCore.pyqtSignal(int, str, str)  # (row, status, eta/filename)
-    total_update = QtCore.pyqtSignal(str)                  # "n/total"
+    update_item_status = QtCore.pyqtSignal(int, str, str)  # (row, status, filename)
+    total_update = QtCore.pyqtSignal(str)                  # "Total: n/total"
+    speed_update = QtCore.pyqtSignal(str)                  # "4.10MB/s"
 
     def __init__(self, links_data, save_path):
         super().__init__()
@@ -23,6 +23,7 @@ class DownloadWorker(QtCore.QObject):
         self.save_path = save_path
         self._is_paused = False
         self._is_stopped = False
+        self._last_speed_emit = 0.0           # throttle cập nhật tốc độ
 
     # --- helpers ---
     def _to_direct(self, url: str) -> str:
@@ -30,23 +31,17 @@ class DownloadWorker(QtCore.QObject):
         if m:
             fid = m.group(1)
             return f"https://drive.google.com/uc?id={fid}&export=download"
-        # cũng hỗ trợ ?id=...
         m = re.search(r"[?&]id=([^&]+)", url)
         return f"https://drive.google.com/uc?id={m.group(1)}&export=download" if m else url
 
     def _run_gdown(self, direct_url: str, out_folder: str):
-        """
-        Chạy gdown CLI:
-        -O <folder/>  => gdown tự đặt tên file đúng
-        Trả về (returncode, iter_lines generator)
-        """
-        # Đảm bảo -O trỏ tới THƯ MỤC (kết thúc bằng sep)
+        # -O <folder/> => gdown tự đặt tên file
         if not out_folder.endswith(os.sep):
             out_folder = out_folder + os.sep
-
         cmd = [sys.executable, "-m", "gdown", direct_url, "-O", out_folder, "--fuzzy"]
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, encoding="utf-8", errors="replace"
         )
         return proc
@@ -56,8 +51,6 @@ class DownloadWorker(QtCore.QObject):
         total = len(self.links_data)
         done = 0
         self.log_message.emit("Starting download process...", "INFO")
-
-        # tạo thư mục đích
         os.makedirs(self.save_path, exist_ok=True)
 
         for idx, (url, row) in enumerate(self.links_data, start=1):
@@ -65,97 +58,103 @@ class DownloadWorker(QtCore.QObject):
                 self.log_message.emit("Download stopped by user.", "WARNING")
                 break
 
-            # Pause loop
             while self._is_paused and not self._is_stopped:
                 time.sleep(0.1)
 
+            # reset progress + speed mỗi file
             self.progress_update.emit(0)
+            self.speed_update.emit("—")
             self.update_item_status.emit(row, "Downloading...", "Preparing...")
             self.log_message.emit(f"Processing link {idx}/{total}: {url}", "INFO")
 
             direct = self._to_direct(url)
             proc = None
             current_filename = None
+            self._last_speed_emit = 0.0
+
             try:
                 proc = self._run_gdown(direct, self.save_path)
-
-                # Đọc realtime
                 assert proc.stdout is not None
+
                 for line in proc.stdout:
                     s = line.strip()
 
-                    # người dùng nhấn stop?
+                    # nhấn Stop
                     if self._is_stopped:
                         proc.terminate()
                         raise RuntimeError("Stopped by user")
 
-                    # parse tên file từ 'To: ...'
+                    # bắt tên file từ 'To: ...'
                     if s.startswith("To:"):
-                        # Lấy tên cuối cùng sau cả \\ và /
                         tail = s.split("To:", 1)[1].strip()
                         current_filename = os.path.basename(tail.replace("\\", "/"))
                         self.update_item_status.emit(row, "Downloading...", current_filename)
                         continue
 
-                    # parse progress '39%|'
-                    m = re.match(r"^(\d+)%\|", s)
-                    if m:
-                        self.progress_update.emit(int(m.group(1)))
+                    # bắt % + tốc độ (MB/s, KB/s, GB/s...) từ dòng progress
+                    # ví dụ gdown/tqdm: "37%|█████▎ ... [00:12<00:18, 4.10MB/s]"
+                    m_pct = re.match(r"^(\d+)%\|", s)
+                    if m_pct:
+                        self.progress_update.emit(int(m_pct.group(1)))
+
+                        # cố gắng tách tốc độ nếu có: lấy phần ", 4.10MB/s]"
+                        m_speed = re.search(r"\[\s*.*?,\s*([0-9.]+\s*(?:[KMG]?B)/s)\s*\]$", s)
+                        if m_speed:
+                            now = time.time()
+                            if now - self._last_speed_emit > 0.3:  # throttle ~300ms
+                                speed = m_speed.group(1).replace(" ", "")
+                                self.speed_update.emit(speed)
+                                self._last_speed_emit = now
                         continue
 
-                    # lọc bớt log ồn ào
+                    # lọc bớt log ồn
                     if (s == "Downloading..." or s == "" or
                         s.startswith("From (original):") or s.startswith("From (redirected):") or
                         s.startswith("From:") or s.startswith("To:") or
                         s.startswith("Processing") or s.startswith("Checking")):
                         continue
 
-                    # còn lại thì đẩy ra log/status
+                    # còn lại: ghi log
                     self.log_message.emit(s, "INFO")
 
                 proc.wait()
                 if proc.returncode != 0:
                     raise RuntimeError(f"gdown exited with code {proc.returncode}")
 
-                # Hoàn tất file
+                # hoàn tất file
                 self.progress_update.emit(100)
+                self.speed_update.emit("—")
                 shown = current_filename or "Downloaded file"
                 self.update_item_status.emit(row, "Completed", shown)
                 self.log_message.emit(f"✅ Downloaded: {shown}", "SUCCESS")
 
                 done += 1
-                self.total_update.emit(f"{done}/{total}")
+                self.total_update.emit(f"Total: {done}/{total}")
 
             except Exception as e:
+                self.progress_update.emit(0)
+                self.speed_update.emit("—")
                 self.update_item_status.emit(row, "Failed", "Error")
                 self.log_message.emit(f"❌ Error: {e}", "ERROR")
                 if proc and proc.poll() is None:
                     proc.kill()
-            # tiếp tục file kế
-            continue
 
         self.log_message.emit(f"All downloads attempted. Successfully downloaded {done} out of {total} links.", "INFO")
         self.finished.emit()
 
     # controls
-    def pause(self):  self._is_paused = True;  self.log_message.emit("Paused.", "INFO")
-    def resume(self): self._is_paused = False; self.log_message.emit("Resumed.", "INFO")
-    def stop(self):   self._is_stopped = True; self.log_message.emit("Stopping...", "WARNING")
-
-
-
-
     def pause(self):
         self._is_paused = True
-        self.log_message.emit("Download paused.", "INFO")
+        self.log_message.emit("Paused.", "INFO")
 
     def resume(self):
         self._is_paused = False
-        self.log_message.emit("Download resumed.", "INFO")
+        self.log_message.emit("Resumed.", "INFO")
 
     def stop(self):
         self._is_stopped = True
-        self.log_message.emit("Stopping download...", "WARNING")
+        self.log_message.emit("Stopping...", "WARNING")
+
         
 # --- Main Application Window ---
 class DriveDownloaderMainWindow(QtWidgets.QWidget):
@@ -184,9 +183,11 @@ class DriveDownloaderMainWindow(QtWidgets.QWidget):
         self.ui.pushButton_Delete.clicked.connect(self._delete_selected_link)
         self.ui.pushButton_DeleteAll.clicked.connect(self._delete_all_links)
         self.ui.pushButton_Download.clicked.connect(self._start_download)
+        
         self.ui.pushButton_Pause.clicked.connect(self._pause_download)
         self.ui.pushButton_Stop.clicked.connect(self._stop_download)
         self.ui.pushButton_SelectFolder.clicked.connect(self._browse_save_folder)
+        
         
         # Connect Up, Down, Edit buttons
         self.ui.pushButton_Up.clicked.connect(lambda: self._move_link_in_table(-1))
@@ -381,9 +382,14 @@ class DriveDownloaderMainWindow(QtWidgets.QWidget):
         self.worker.log_message.connect(self._log_message)
         self.worker.update_item_status.connect(self._update_table_item_status)
         self.worker.total_update.connect(lambda t: self.ui.label_Total.setText(t))
+        self.worker.speed_update.connect(lambda s: self.ui.label_Speed.setText(f"Speed: {s}"))
         # khi bắt đầu:
         self.ui.label_Total.setText(f"Total: 0/{len(self.current_links_data)}")
         # Start the thread
+        
+        self.ui.label_Speed.setText("Speed: —")
+        self.ui.label_Total.setText(f"Total: 0/{len(self.current_links_data)}")
+
         self.download_thread.start()
         self._log_message("Download initiated.", "INFO")
 
