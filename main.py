@@ -457,7 +457,10 @@ class AddLinkWindow(QtWidgets.QDialog): # Changed from QWidget to QDialog
 
     def _emit_links_and_close(self):
         links_text = self.ui.textEdit_ListLink.toPlainText()
-        links = [link.strip() for link in links_text.split('\n') if link.strip()]
+        if links_text.find(",") != -1:
+            links = [link.strip() for link in links_text.split(',') if link.strip()]
+        else:
+            links = [link.strip() for link in links_text.split('\n') if link.strip()]
         
         if links:
             self.links_added.emit(links) # Emit the list of links
